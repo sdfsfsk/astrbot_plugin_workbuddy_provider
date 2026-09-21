@@ -1,0 +1,50 @@
+{
+  "realm": {
+    "description": "默认登录区域",
+    "type": "string",
+    "hint": "cn = 国内版（codebuddy.cn / copilot.tencent.com）；global = 国际版（workbuddy.ai，需要能直连国际网络）。登录时也可用 /workbuddy_login cn 或 /workbuddy_login global 临时指定。",
+    "options": ["cn", "global"],
+    "labels": ["国内版（默认）", "国际版"],
+    "default": "cn"
+  },
+  "reasoning_effort": {
+    "description": "推理深度",
+    "type": "string",
+    "hint": "控制模型思考深度，也可用 /workbuddy_reasoning 指令调整。级别越高越聪明但越慢、额度消耗越大；插件会按模型实际支持的档位自动降级，不支持的模型不会发送该参数。",
+    "options": ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+    "labels": ["关闭", "最少", "低", "中（默认）", "高", "很高", "最高（最慢）"],
+    "default": "medium"
+  },
+  "thinking_enabled": {
+    "description": "启用 DeepSeek 思维链",
+    "type": "bool",
+    "hint": "DeepSeek 系列（deepseek-v4-pro / deepseek-v4-flash / deepseek-v4.1-flash）必须显式开启 thinking 才会返回思维链，否则上游按“不思考”应答。其他模型不受影响。",
+    "default": true
+  },
+  "image_model": {
+    "description": "文生图模型",
+    "type": "string",
+    "hint": "默认 auto：在线读取 WorkBuddy 模型目录，自动选取带 text-to-image 标签的第一个模型；也可手动填写模型 ID（如 hunyuan-image-alpha）。指令 /workbuddy_image_model 可查看、切换和刷新。",
+    "default": "auto"
+  },
+  "image_edit_model": {
+    "description": "改图（图生图）模型",
+    "type": "string",
+    "hint": "默认 auto：在线读取模型目录，自动选取带 image-to-image 标签的第一个模型；也可手动填写模型 ID（如 hunyuan-image-alpha-edit）。",
+    "default": "auto"
+  },
+  "image_size": {
+    "description": "图片尺寸",
+    "type": "string",
+    "hint": "生成图片的像素尺寸，需与上游图片模型支持的一致。",
+    "options": ["1024x1024", "1024x1536", "1536x1024"],
+    "labels": ["正方形 1024x1024（默认）", "竖版 1024x1536", "横版 1536x1024"],
+    "default": "1024x1024"
+  },
+  "image_n": {
+    "description": "每次生成张数",
+    "type": "int",
+    "hint": "一次请求生成的图片数量（1-4）。数量越多额度消耗越大，插件只会发送第一张。",
+    "default": 1
+  }
+}
