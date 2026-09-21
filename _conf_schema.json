@@ -24,7 +24,7 @@
   "enable_search_tool": {
     "description": "启用联网搜索工具",
     "type": "bool",
-    "hint": "注册 workbuddy_web_search LLM 工具，让模型可调用 WorkBuddy 订阅自带的联网搜索（上游 /agenttool/v1/search）。注意联网搜索有独立额度（错误码 15001），与对话额度分开计算。",
+    "hint": "注册 workbuddy_web_search LLM 工具（上游 /agenttool/v1/search），并自动禁用 AstrBot 自带联网搜索，改由 WorkBuddy 联网搜索接管；关闭本项或卸载插件时会自动恢复 AstrBot 的联网开关。注意联网搜索有独立额度（错误码 15001），与对话额度分开计算。",
     "default": true
   },
   "enable_fetch_tool": {
@@ -32,12 +32,6 @@
     "type": "bool",
     "hint": "注册 workbuddy_web_fetch LLM 工具，可读取指定网址的正文（上游 /agenttool/v1/webfetch）。",
     "default": true
-  },
-  "force_workbuddy_web_search": {
-    "description": "强制使用 WorkBuddy 联网搜索",
-    "type": "bool",
-    "hint": "仅在联网搜索工具已启用时生效；开启后禁用 AstrBot 自带联网搜索，关闭、禁用工具或卸载插件时自动恢复。",
-    "default": false
   },
   "search_max_results": {
     "description": "联网搜索返回条数",

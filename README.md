@@ -15,7 +15,7 @@
 - **DeepSeek 思维链**：自动为 deepseek 系列注入 `thinking.type=enabled` + 推理档位，思维链正常回传
 - **订阅额度查询**：`/workbuddy_usage` 显示账号、令牌有效期与各额度包剩余 credits
 - **图片生成与改图**：`/workbuddy_image` 指令 + LLM 工具 `workbuddy_generate_image`，走官方图片端点（`/v2/images/generations` 与 `/v2/images/edits`）；当前消息或引用消息带图时自动改图，最多 3 张参考图
-- **联网搜索与网页读取**：`/workbuddy_search` 指令 + LLM 工具 `workbuddy_web_search` / `workbuddy_web_fetch`，走官方 `/agenttool/v1/*` 端点，支持时效过滤（今天/本周/本月/今年）；可一键顶替 AstrBot 自带联网搜索
+- **联网搜索与网页读取**：`/workbuddy_search` 指令 + LLM 工具 `workbuddy_web_search` / `workbuddy_web_fetch`，走官方 `/agenttool/v1/*` 端点，支持时效过滤（今天/本周/本月/今年）；**启用后自动禁用 AstrBot 自带联网搜索**，关闭或卸载时自动恢复
 - **完整能力**：流式输出、工具调用（Function Calling）、多模态图片输入、多 Key 轮转、`prompt_cache_key` 费用优化
 
 ## 图片生成说明
@@ -42,6 +42,18 @@ WorkBuddy 的绘图能力**不在对话端点上**：用 `hunyuan-image-*` 模�
 - `freshness` 取值形如 `d1`（今天）、`w1`（最近一周）、`m1`（本月至今）、`y1`（今年至今）。
 - 屏蔽域名会按官方客户端做法拼成 `-site:` 操作符追加到查询词后面。
 - ⚠️ **联网搜索有独立额度**：客户端错误码表中 `15001` 即 `quota_web_search`，与对话额度分开计费，额度不足时插件会明确提示。
+
+### 与 AstrBot 自带联网搜索的关系
+
+`enable_search_tool` 开启时，插件会：
+
+1. 注册 `workbuddy_web_search` 工具；
+2. 把 AstrBot 的 `provider_settings.web_search` 置为 `false`，避免两套搜索同时注入提示词、重复消耗额度；
+3. 写一个标记文件记录"这次关闭是本插件做的"。
+
+关闭该配置项或卸载插件时，插件会依据标记把 `web_search` 恢复为 `true`。如果 AstrBot 自带联网本来就是关的，插件不会写标记，也不会去动它。
+
+> 与 Codex 插件共存时两者行为一致（都希望内置搜索关闭），不会互相打架。
 
 ## 风险提示
 
@@ -89,9 +101,8 @@ WorkBuddy 的绘图能力**不在对话端点上**：用 `hunyuan-image-*` 模�
 | `image_edit_model` | `auto` | 改图模型；`auto` 取目录中第一个 `image-to-image` 模型 |
 | `image_size` | `1024x1024` | 图片尺寸（另支持 `1024x1536` / `1536x1024`） |
 | `image_n` | `1` | 单次生成张数（1-4，插件只发送第一张） |
-| `enable_search_tool` | `true` | 注册 `workbuddy_web_search` 联网搜索工具 |
+| `enable_search_tool` | `true` | 注册 `workbuddy_web_search` 工具，**并自动禁用 AstrBot 自带联网搜索**；关闭或卸载时自动恢复 |
 | `enable_fetch_tool` | `true` | 注册 `workbuddy_web_fetch` 网页读取工具 |
-| `force_workbuddy_web_search` | `false` | 开启后禁用 AstrBot 自带联网搜索，只走 WorkBuddy；关闭/卸载时自动恢复 |
 | `search_max_results` | `5` | 每次联网搜索请求的结果条数（1-20） |
 
 提供商级别的配置：`api_base`（CN 默认 `https://copilot.tencent.com`，国际版 `https://www.workbuddy.ai`）、`proxy`（**留空即直连**）、`model`、`key`、`timeout`。

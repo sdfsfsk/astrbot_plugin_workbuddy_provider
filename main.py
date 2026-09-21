@@ -174,12 +174,14 @@ class WorkBuddyProviderPlugin(Star):
         logger.info("[WorkBuddy] 已恢复 AstrBot 自带联网搜索开关")
 
     async def _apply_web_search_policy(self) -> None:
-        """Apply the web-tool toggles and the force-WorkBuddy-search switch.
+        """Apply the web-tool toggles and take over AstrBot's built-in search.
 
-        When ``force_workbuddy_web_search`` is on, AstrBot's built-in web
-        search (``provider_settings.web_search``) is disabled so the WorkBuddy
-        search tool becomes the only search path; turning the toggle off
-        restores the previous value, tracked by a marker file.
+        Enabling ``enable_search_tool`` makes the WorkBuddy subscription search
+        the only search path: AstrBot's own ``provider_settings.web_search`` is
+        switched off while the tool is active, and restored as soon as the tool
+        is disabled or the plugin unloads. A marker file records that this
+        plugin performed the switch so a user who never enabled the tool is
+        never affected.
         """
         search_enabled = bool(self.config.get("enable_search_tool", True))
         fetch_enabled = bool(self.config.get("enable_fetch_tool", True))
@@ -192,10 +194,7 @@ class WorkBuddyProviderPlugin(Star):
             else:
                 await self.context.deactivate_llm_tool_async(name)
 
-        force_search = search_enabled and bool(
-            self.config.get("force_workbuddy_web_search", False)
-        )
-        if not force_search:
+        if not search_enabled:
             await self._restore_web_search_policy()
             return
 
@@ -208,7 +207,9 @@ class WorkBuddyProviderPlugin(Star):
             temp_marker.replace(marker)
             prov_settings["web_search"] = False
             conf.save_config()
-            logger.info("[WorkBuddy] 已按插件配置禁用 AstrBot 自带联网搜索")
+            logger.info(
+                "[WorkBuddy] 已禁用 AstrBot 自带联网搜索，改由 WorkBuddy 联网搜索接管"
+            )
 
     async def terminate(self) -> None:
         """Cancel login polling and release the provider registration."""
