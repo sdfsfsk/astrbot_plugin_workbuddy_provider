@@ -395,34 +395,63 @@ class WorkBuddyProviderPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("workbuddy_reasoning")
     async def workbuddy_reasoning(self, event: AstrMessageEvent, level: str = ""):
-        """查看或设置 WorkBuddy 推理深度（off/minimal/low/medium/high/xhigh/max）"""
+        """查看或设置 WorkBuddy 推理深度，并显示当前模型支持的档位"""
         level = (level or "").strip().lower()
         levels = " / ".join(WORKBUDDY_EFFORT_RANK)
-        if not level:
-            current = get_workbuddy_settings()["reasoning_effort"]
-            yield event.plain_result(
-                f"当前 WorkBuddy 推理深度：{current}\n"
-                f"可选值：{levels}\n"
-                "用法：/workbuddy_reasoning <级别>\n"
-                "（也可在插件配置页修改；插件会按模型支持档位自动降级）"
-            )
-            return
-        if level not in WORKBUDDY_EFFORT_RANK:
+        if level and level not in WORKBUDDY_EFFORT_RANK:
             yield event.plain_result(f"无效的推理深度：{level}\n可选值：{levels}")
             return
-        previous = self.config.get("reasoning_effort")
-        self.config["reasoning_effort"] = level
-        try:
-            self.config.save_config()
-        except OSError:
-            if previous is None:
-                self.config.pop("reasoning_effort", None)
-            else:
-                self.config["reasoning_effort"] = previous
-            yield event.plain_result("❌ 配置保存失败，请检查配置文件权限。")
-            return
-        update_workbuddy_settings(self.config)
-        yield event.plain_result(f"✅ WorkBuddy 推理深度已设为：{level}")
+        lines: list[str] = []
+        if level:
+            previous = self.config.get("reasoning_effort")
+            self.config["reasoning_effort"] = level
+            try:
+                self.config.save_config()
+            except OSError:
+                if previous is None:
+                    self.config.pop("reasoning_effort", None)
+                else:
+                    self.config["reasoning_effort"] = previous
+                yield event.plain_result("❌ 配置保存失败，请检查配置文件权限。")
+                return
+            update_workbuddy_settings(self.config)
+            lines.append(f"✅ 推理深度已设为：{level}")
+
+        configured = get_workbuddy_settings()["reasoning_effort"]
+        lines.append(f"当前 WorkBuddy 推理深度：{configured}")
+
+        provider = self._get_workbuddy_provider()
+        if provider is None:
+            lines.append("未找到已启用的 WorkBuddy 提供商，无法读取当前模型的档位。")
+        else:
+            try:
+                info = await provider.get_reasoning_info()
+            except (httpx.HTTPError, OSError) as e:
+                info = None
+                lines.append(f"⚠️ 读取模型档位失败：{e}")
+            if info is not None:
+                model = info["model"] or "未设置"
+                lines.append(f"当前模型：{model}")
+                if info["supported"]:
+                    lines.append("该模型支持：" + " / ".join(info["supported"]))
+                    if info["default"]:
+                        lines.append(f"模型默认档位：{info['default']}")
+                    if info["effective"] != configured:
+                        lines.append(
+                            f"实际发送：{info['effective']}"
+                            f"（{configured} 不被支持，已自动降级）"
+                        )
+                    else:
+                        lines.append(f"实际发送：{info['effective']}")
+                elif model.lower().startswith("deepseek"):
+                    lines.append("该模型未声明支持档位，将按 DeepSeek 方式透传设置值。")
+                else:
+                    lines.append("该模型未声明支持档位，插件不会向其发送该参数。")
+
+        lines.append(f"全部可选值：{levels}")
+        lines.append("用法：/workbuddy_reasoning <级别>")
+        lines.append("（也可在插件配置页修改）")
+        yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("workbuddy_image_model")

@@ -1,5 +1,6 @@
 """Offline unit tests for the WorkBuddy plugin (no network, no credentials)."""
 
+import asyncio
 import base64
 import json
 import time
@@ -205,6 +206,93 @@ def test_normalize_image_model_valid(value, expected):
 def test_normalize_image_model_invalid(value):
     with pytest.raises(ValueError):
         source.normalize_image_model(value)
+
+
+# --- reasoning introspection ------------------------------------------------
+
+
+def _provider_with_catalog(entries: list[dict], model: str) -> "source.ProviderWorkBuddy":
+    """Build an offline provider whose model catalog is pre-seeded."""
+    provider = source.ProviderWorkBuddy(
+        {
+            "id": "test",
+            "type": "workbuddy_chat_completion",
+            "provider_type": "chat_completion",
+            "enable": True,
+            "key": [],
+            "api_base": "https://copilot.tencent.com",
+            "timeout": 30,
+            "proxy": "",
+            "model": model,
+            "custom_headers": {},
+            "custom_extra_body": {},
+        },
+        {},
+    )
+    provider._model_cache = entries
+    provider._model_cache_at = time.monotonic()
+    return provider
+
+
+def test_get_reasoning_info_downgrades_to_supported_level():
+    """A configured level the model rejects must be reported as downgraded."""
+    provider = _provider_with_catalog(
+        [
+            {
+                "id": "glm-5.3",
+                "reasoning": {
+                    "supportedEfforts": ["low", "high", "max"],
+                    "defaultEffort": "high",
+                },
+            }
+        ],
+        "glm-5.3",
+    )
+    source.update_workbuddy_settings({"reasoning_effort": "medium"})
+    info = asyncio.run(provider.get_reasoning_info())
+    assert info["model"] == "glm-5.3"
+    assert info["supported"] == ["low", "high", "max"]
+    assert info["default"] == "high"
+    assert info["effective"] == "low"
+
+
+def test_get_reasoning_info_keeps_supported_level():
+    provider = _provider_with_catalog(
+        [{"id": "glm-5.3", "reasoning": {"supportedEfforts": ["low", "high", "max"]}}],
+        "glm-5.3",
+    )
+    source.update_workbuddy_settings({"reasoning_effort": "max"})
+    info = asyncio.run(provider.get_reasoning_info())
+    assert info["effective"] == "max"
+
+
+def test_get_reasoning_info_omits_field_for_plain_model():
+    """Models without a reasoning block must not receive the parameter."""
+    provider = _provider_with_catalog([{"id": "glm-4.6", "reasoning": None}], "glm-4.6")
+    source.update_workbuddy_settings({"reasoning_effort": "high"})
+    info = asyncio.run(provider.get_reasoning_info())
+    assert info["supported"] == []
+    assert info["effective"] == ""
+
+
+def test_get_reasoning_info_passes_through_for_deepseek():
+    """DeepSeek models accept an effort even without an advertised list."""
+    provider = _provider_with_catalog(
+        [{"id": "deepseek-v4.1-flash", "reasoning": {"effort": "high"}}],
+        "deepseek-v4.1-flash",
+    )
+    source.update_workbuddy_settings({"reasoning_effort": "medium"})
+    info = asyncio.run(provider.get_reasoning_info())
+    assert info["supported"] == []
+    assert info["effective"] == "medium"
+
+
+def test_get_reasoning_info_reports_empty_effective_for_unknown_model():
+    provider = _provider_with_catalog([], "mystery-model")
+    source.update_workbuddy_settings({"reasoning_effort": "high"})
+    info = asyncio.run(provider.get_reasoning_info())
+    assert info["model"] == "mystery-model"
+    assert info["effective"] == ""
 
 
 # --- catalog filtering ------------------------------------------------------

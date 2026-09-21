@@ -832,16 +832,49 @@ class ProviderWorkBuddy(ProviderOpenAIOfficial):
             )
         extra_body["prompt_cache_key"] = cache_key
 
+    def _catalog_entry(self, model: str) -> dict:
+        """Return the catalog entry for one model id, or an empty dict."""
+        target = str(model or "").lower()
+        for entry in self._model_cache:
+            if str(entry.get("id") or "").lower() == target:
+                return entry
+        return {}
+
     def _supported_efforts(self, model: str) -> list[str]:
         """Return the reasoning efforts the catalog advertises for a model."""
-        for entry in self._model_cache:
-            if str(entry.get("id") or "").lower() == model:
-                reasoning = entry.get("reasoning") or {}
-                efforts = reasoning.get("supportedEfforts")
-                if isinstance(efforts, list):
-                    return [str(name) for name in efforts]
-                break
-        return []
+        reasoning = self._catalog_entry(model).get("reasoning") or {}
+        efforts = reasoning.get("supportedEfforts")
+        return [str(name) for name in efforts] if isinstance(efforts, list) else []
+
+    async def get_reasoning_info(self) -> dict:
+        """Describe the reasoning depth the configured model actually accepts.
+
+        The plugin translates the global effort setting into whatever the
+        selected model advertises, so the value sent upstream can differ from
+        the configured one.
+
+        Returns:
+            Dict with ``model``, ``supported`` (levels the model advertises),
+            ``default`` (upstream default level, may be empty) and ``effective``
+            (the level really sent, empty when the field is omitted).
+        """
+        await self._request_model_catalog()
+        model = str(self.get_model() or "")
+        reasoning = self._catalog_entry(model).get("reasoning") or {}
+        supported = self._supported_efforts(model)
+        configured = get_workbuddy_settings()["reasoning_effort"]
+        if supported:
+            effective = _downgrade_effort(configured, supported)
+        elif model.lower().startswith("deepseek"):
+            effective = configured
+        else:
+            effective = ""
+        return {
+            "model": model,
+            "supported": supported,
+            "default": str(reasoning.get("defaultEffort") or ""),
+            "effective": effective,
+        }
 
     async def text_chat(
         self,
