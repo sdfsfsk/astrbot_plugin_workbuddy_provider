@@ -1,7 +1,7 @@
 name: astrbot_plugin_workbuddy_provider
 display_name: WorkBuddy 订阅接入
-short_desc: 用 WorkBuddy（腾讯 CodeBuddy）订阅额度驱动 AstrBot 对话与绘图
-desc: WorkBuddy（腾讯 CodeBuddy）模型服务提供商：内置浏览器授权登录（无需外部网关或 CLI）、访问令牌自动填充与到期续期、订阅额度查询、推理深度调节、图片生成与改图
+short_desc: 用 WorkBuddy（腾讯 CodeBuddy）订阅额度驱动 AstrBot 对话、联网搜索与绘图
+desc: WorkBuddy（腾讯 CodeBuddy）模型服务提供商：内置浏览器授权登录（无需外部网关或 CLI）、访问令牌自动填充与到期续期、订阅额度查询、推理深度调节、图片生成与改图、自带联网搜索与网页读取
 version: v1.0.0
 author: Matsuko
 repo: "https://github.com/sdfsfsk/astrbot_plugin_workbuddy_provider"

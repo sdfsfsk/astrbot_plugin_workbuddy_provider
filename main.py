@@ -19,7 +19,10 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.message.components import Image, Reply
-from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+from astrbot.core.utils.astrbot_path import (
+    get_astrbot_plugin_data_path,
+    get_astrbot_temp_path,
+)
 from astrbot.core.utils.media_utils import resolve_media_ref_to_base64_data
 
 from .workbuddy_auth import (
@@ -125,20 +128,87 @@ class WorkBuddyProviderPlugin(Star):
                     )
                     await provider_manager.reload(entry)
         self._harden_tool_schemas()
+        await self._apply_web_search_policy()
 
     def _harden_tool_schemas(self) -> None:
         """Apply required/default constraints missing from AstrBot's decorator."""
         manager = self.context.get_llm_tool_manager()
-        tool = manager.get_func("workbuddy_generate_image")
-        if tool is None or not isinstance(tool.parameters, dict):
+        specifications = {
+            "workbuddy_generate_image": ("prompt", {"use_reference_images": True}),
+            "workbuddy_web_search": ("query", {}),
+            "workbuddy_web_fetch": ("url", {}),
+        }
+        for name, (required, defaults) in specifications.items():
+            tool = manager.get_func(name)
+            if tool is None or not isinstance(tool.parameters, dict):
+                continue
+            tool.parameters["required"] = [required]
+            tool.parameters["additionalProperties"] = False
+            properties = tool.parameters.get("properties")
+            if not isinstance(properties, dict):
+                continue
+            for property_name, default in defaults.items():
+                prop = properties.get(property_name)
+                if isinstance(prop, dict):
+                    prop["default"] = default
+
+    def _web_search_marker_path(self) -> Path:
+        """Return the marker recording that this plugin disabled AstrBot search."""
+        data_dir = (
+            Path(get_astrbot_plugin_data_path())
+            / "astrbot_plugin_workbuddy_provider"
+        )
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir / "websearch_force.marker"
+
+    async def _restore_web_search_policy(self) -> None:
+        """Restore AstrBot's built-in search when this plugin disabled it."""
+        marker = self._web_search_marker_path()
+        if not marker.exists():
             return
-        tool.parameters["required"] = ["prompt"]
-        tool.parameters["additionalProperties"] = False
-        properties = tool.parameters.get("properties")
-        if isinstance(properties, dict):
-            prop = properties.get("use_reference_images")
-            if isinstance(prop, dict):
-                prop["default"] = True
+        conf = self.context.get_config()
+        prov_settings = conf.get("provider_settings", {})
+        prov_settings["web_search"] = True
+        conf.save_config()
+        marker.unlink(missing_ok=True)
+        logger.info("[WorkBuddy] 已恢复 AstrBot 自带联网搜索开关")
+
+    async def _apply_web_search_policy(self) -> None:
+        """Apply the web-tool toggles and the force-WorkBuddy-search switch.
+
+        When ``force_workbuddy_web_search`` is on, AstrBot's built-in web
+        search (``provider_settings.web_search``) is disabled so the WorkBuddy
+        search tool becomes the only search path; turning the toggle off
+        restores the previous value, tracked by a marker file.
+        """
+        search_enabled = bool(self.config.get("enable_search_tool", True))
+        fetch_enabled = bool(self.config.get("enable_fetch_tool", True))
+        for name, enabled in (
+            ("workbuddy_web_search", search_enabled),
+            ("workbuddy_web_fetch", fetch_enabled),
+        ):
+            if enabled:
+                await self.context.activate_llm_tool_async(name)
+            else:
+                await self.context.deactivate_llm_tool_async(name)
+
+        force_search = search_enabled and bool(
+            self.config.get("force_workbuddy_web_search", False)
+        )
+        if not force_search:
+            await self._restore_web_search_policy()
+            return
+
+        marker = self._web_search_marker_path()
+        conf = self.context.get_config()
+        prov_settings = conf.get("provider_settings", {})
+        if prov_settings.get("web_search", False):
+            temp_marker = marker.with_suffix(".tmp")
+            temp_marker.write_text("restore=true\n", encoding="utf-8")
+            temp_marker.replace(marker)
+            prov_settings["web_search"] = False
+            conf.save_config()
+            logger.info("[WorkBuddy] 已按插件配置禁用 AstrBot 自带联网搜索")
 
     async def terminate(self) -> None:
         """Cancel login polling and release the provider registration."""
@@ -147,6 +217,7 @@ class WorkBuddyProviderPlugin(Star):
             login_task.cancel()
             if login_task is not asyncio.current_task():
                 await asyncio.gather(login_task, return_exceptions=True)
+        await self._restore_web_search_policy()
         provider_manager = self.context.provider_manager
         provider_ids = [
             inst.provider_config.get("id")
@@ -660,6 +731,39 @@ class WorkBuddyProviderPlugin(Star):
         path = self._save_generated_image(data)
         yield event.image_result(str(path))
 
+    @filter.command("workbuddy_search")
+    async def workbuddy_search(self, event: AstrMessageEvent, query: str = ""):
+        """用 WorkBuddy 订阅额度联网搜索，返回带链接的实时结果"""
+        query = (query or "").strip()
+        if not query:
+            yield event.plain_result(
+                "用法：/workbuddy_search <关键词>\n"
+                "（模型也可自行调用 workbuddy_web_search 工具联网搜索）"
+            )
+            return
+        provider = self._get_workbuddy_provider()
+        if provider is None:
+            yield event.plain_result(
+                "未找到已启用的 WorkBuddy 提供商，请先在 WebUI 配置或发送 /workbuddy_login。"
+            )
+            return
+        try:
+            result = await provider.search_web(
+                query, max_results=get_workbuddy_settings()["search_max_results"]
+            )
+        except (ValueError, PermissionError, RuntimeError, httpx.HTTPError) as e:
+            yield event.plain_result(f"❌ 联网搜索失败：{e}")
+            return
+        sources = result["sources"]
+        if not sources:
+            yield event.plain_result(f"没有找到与「{query}」相关的结果。")
+            return
+        lines = [f"🔍 联网搜索：{query}", ""]
+        for index, item in enumerate(sources[:8], 1):
+            lines.append(f"{index}. {item['title'] or item['url']}")
+            lines.append(f"   {item['url']}")
+        yield event.plain_result("\n".join(lines))
+
     @filter.llm_tool(name="workbuddy_generate_image")
     async def workbuddy_generate_image(
         self,
@@ -729,3 +833,57 @@ class WorkBuddyProviderPlugin(Star):
             f"图片尺寸：{'、'.join(WORKBUDDY_IMAGE_SIZES)}，当前 {settings['image_size']}",
         ]
         return "\n".join(lines)
+
+    @filter.llm_tool(name="workbuddy_web_search")
+    async def workbuddy_web_search(
+        self,
+        event: AstrMessageEvent,
+        query: str = "",
+        freshness: str = "",
+    ) -> str:
+        """使用 WorkBuddy 订阅自带的联网搜索获取实时网络信息。当需要查询最新资讯、新闻、天气、资料、价格、比分、版本更新等实时或时效性内容时调用本工具；结果已带标题与链接，可直接引用。
+
+        Args:
+            query(string): 搜索查询词，尽量具体明确，可包含时间限定词（如"今天"、"最新"）
+            freshness(string): 可选时效范围，d1=今天、w1=最近一周、m1=本月至今、y1=今年至今；不需要时效限制时留空
+        """
+        provider = self._get_workbuddy_provider()
+        if provider is None:
+            return (
+                "错误：未配置 WorkBuddy 提供商，无法联网搜索。"
+                "请提示主人配置或发送 /workbuddy_login。"
+            )
+        try:
+            result = await provider.search_web(
+                query,
+                freshness=freshness,
+                max_results=get_workbuddy_settings()["search_max_results"],
+            )
+        except (ValueError, PermissionError, RuntimeError, httpx.HTTPError) as e:
+            return f"联网搜索失败：{e}"
+        return result["content"]
+
+    @filter.llm_tool(name="workbuddy_web_fetch")
+    async def workbuddy_web_fetch(
+        self,
+        event: AstrMessageEvent,
+        url: str = "",
+        prompt: str = "",
+    ) -> str:
+        """读取指定网页的正文并返回 Markdown 内容。当需要查看某个具体链接的详细内容、核实搜索结果、或用户直接给出网址时调用本工具。
+
+        Args:
+            url(string): 要读取的完整 http/https 网址
+            prompt(string): 可选，说明想从该页面获取什么信息，留空则返回页面主要内容
+        """
+        provider = self._get_workbuddy_provider()
+        if provider is None:
+            return "错误：未配置 WorkBuddy 提供商，无法读取网页。"
+        try:
+            result = await provider.fetch_web(url, prompt)
+        except (ValueError, PermissionError, RuntimeError, httpx.HTTPError) as e:
+            return f"网页读取失败：{e}"
+        header = (
+            f"# {result['title']}\n{result['url']}\n\n" if result["title"] else ""
+        )
+        return header + result["content"]

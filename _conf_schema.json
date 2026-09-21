@@ -21,6 +21,30 @@
     "hint": "DeepSeek 系列（deepseek-v4-pro / deepseek-v4-flash / deepseek-v4.1-flash）必须显式开启 thinking 才会返回思维链，否则上游按“不思考”应答。其他模型不受影响。",
     "default": true
   },
+  "enable_search_tool": {
+    "description": "启用联网搜索工具",
+    "type": "bool",
+    "hint": "注册 workbuddy_web_search LLM 工具，让模型可调用 WorkBuddy 订阅自带的联网搜索（上游 /agenttool/v1/search）。注意联网搜索有独立额度（错误码 15001），与对话额度分开计算。",
+    "default": true
+  },
+  "enable_fetch_tool": {
+    "description": "启用网页读取工具",
+    "type": "bool",
+    "hint": "注册 workbuddy_web_fetch LLM 工具，可读取指定网址的正文（上游 /agenttool/v1/webfetch）。",
+    "default": true
+  },
+  "force_workbuddy_web_search": {
+    "description": "强制使用 WorkBuddy 联网搜索",
+    "type": "bool",
+    "hint": "仅在联网搜索工具已启用时生效；开启后禁用 AstrBot 自带联网搜索，关闭、禁用工具或卸载插件时自动恢复。",
+    "default": false
+  },
+  "search_max_results": {
+    "description": "联网搜索返回条数",
+    "type": "int",
+    "hint": "每次联网搜索向上游请求的结果条数（1-20），默认 5。条数越多上下文越长。",
+    "default": 5
+  },
   "image_model": {
     "description": "文生图模型",
     "type": "string",

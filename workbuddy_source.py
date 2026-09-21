@@ -20,6 +20,7 @@ import secrets
 import time
 from datetime import datetime, timezone
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -82,6 +83,17 @@ WORKBUDDY_IMAGE_MAX_INPUT_BYTES = 10 * 1024 * 1024
 WORKBUDDY_IMAGE_MAX_OUTPUT_BYTES = 25 * 1024 * 1024
 WORKBUDDY_MAX_IMAGE_PROMPT_CHARS = 32_000
 
+# Subscription web tooling. Both endpoints live under ``/agenttool/v1`` and are
+# driven by the same access token as chat; web search draws on its own quota.
+WORKBUDDY_SEARCH_API_PATH = "/agenttool/v1/search"
+WORKBUDDY_WEBFETCH_API_PATH = "/agenttool/v1/webfetch"
+WORKBUDDY_SEARCH_DEFAULT_RESULTS = 5
+WORKBUDDY_SEARCH_MAX_RESULTS = 20
+WORKBUDDY_MAX_SEARCH_QUERY_CHARS = 2_000
+WORKBUDDY_MAX_FETCH_PROMPT_CHARS = 2_000
+WORKBUDDY_WEB_SEARCH_MAX_CHARS = 6_000
+WORKBUDDY_WEB_FETCH_MAX_CHARS = 8_000
+
 # Model prefixes and limits the upstream treats as non-chat entries.
 WORKBUDDY_NON_CHAT_PREFIXES = ("nes-", "completion-", "codewise-")
 WORKBUDDY_NON_CHAT_MAX_OUTPUT_TOKENS = 256
@@ -109,6 +121,8 @@ WORKBUDDY_MODEL_CATALOG = [
 
 _TOKEN_REFRESH_LOCK = asyncio.Lock()
 _JWT_PATTERN = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
+# Search recency window: one unit letter (day/week/month/year) plus a count.
+_FRESHNESS_PATTERN = re.compile(r"[dwmy]\d{1,3}")
 _TERMINAL_QUOTA_PATTERN = re.compile(
     r"insufficient|out of credit|quota|balance|exceeded|6004|14017|14018",
     re.IGNORECASE,
@@ -121,6 +135,7 @@ _PLUGIN_SETTINGS: dict = {
     "image_edit_model": "auto",
     "image_size": "1024x1024",
     "image_n": 1,
+    "search_max_results": WORKBUDDY_SEARCH_DEFAULT_RESULTS,
 }
 
 
@@ -152,6 +167,13 @@ def update_workbuddy_settings(settings: dict) -> None:
     count = settings.get("image_n")
     if isinstance(count, int) and not isinstance(count, bool) and 1 <= count <= 4:
         _PLUGIN_SETTINGS["image_n"] = count
+    results = settings.get("search_max_results")
+    if (
+        isinstance(results, int)
+        and not isinstance(results, bool)
+        and 1 <= results <= WORKBUDDY_SEARCH_MAX_RESULTS
+    ):
+        _PLUGIN_SETTINGS["search_max_results"] = results
 
 
 def get_workbuddy_settings() -> dict:
@@ -1174,6 +1196,231 @@ class ProviderWorkBuddy(ProviderOpenAIOfficial):
         if len(raw) > WORKBUDDY_IMAGE_MAX_OUTPUT_BYTES:
             raise RuntimeError("图片生成响应超过 25 MiB 安全上限。")
         return raw
+
+    async def _agent_tool_request(
+        self, path: str, body: dict, *, timeout: float
+    ) -> dict:
+        """POST to one upstream ``/agenttool`` endpoint and parse the payload.
+
+        Args:
+            path: Endpoint path beginning with ``/agenttool/``.
+            body: JSON request body.
+            timeout: Request timeout in seconds.
+
+        Returns:
+            The parsed JSON payload.
+
+        Raises:
+            ValueError: If no access token is configured.
+            PermissionError: If the token is rejected.
+            RuntimeError: For transport, HTTP or business-code failures.
+        """
+        await self._maybe_refresh_token()
+        token = self._active_token()
+        if not token:
+            raise ValueError("未配置 WorkBuddy 访问令牌，请先 /workbuddy_login。")
+        async with create_client(self.provider_config.get("proxy"), timeout) as client:
+            resp = await client.post(
+                f"{self.api_base}{path}",
+                json=body,
+                headers={
+                    **self._account_headers(),
+                    "Accept": "application/json",
+                    "Content-Type": "application/json; charset=utf-8",
+                    "Authorization": f"Bearer {token}",
+                    # The official client marks tool traffic with an agent intent.
+                    "X-Agent-Intent": "craft",
+                },
+            )
+        if resp.status_code in (401, 403):
+            raise PermissionError(
+                f"访问令牌无效或已过期（HTTP {resp.status_code}），"
+                "请重新 /workbuddy_login。"
+            )
+        if resp.status_code == 429:
+            raise RuntimeError("上游限流（HTTP 429），请稍后再试。")
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"上游 {path} 返回 HTTP {resp.status_code}：{_safe_detail(resp.text)}"
+            )
+        try:
+            payload = resp.json()
+        except ValueError as e:
+            raise RuntimeError(f"上游 {path} 返回了无效 JSON。") from e
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"上游 {path} 响应格式异常。")
+        code = payload.get("code")
+        if code not in (None, 0):
+            message = _safe_detail(payload.get("msg") or payload.get("message"))
+            if str(code) == "15001":
+                raise RuntimeError(f"联网搜索额度不足（code=15001 {message}）。")
+            raise RuntimeError(f"上游 {path} 错误：code={code} {message}")
+        return payload
+
+    async def search_web(
+        self,
+        query: str,
+        *,
+        allowed_domains: list[str] | None = None,
+        blocked_domains: list[str] | None = None,
+        freshness: str = "",
+        max_results: int = WORKBUDDY_SEARCH_DEFAULT_RESULTS,
+    ) -> dict:
+        """Search the live web with the WorkBuddy subscription search tool.
+
+        Args:
+            query: The search query, at least two characters long.
+            allowed_domains: Optional allow-list of domains to restrict to.
+            blocked_domains: Optional deny-list, sent as ``-site:`` operators.
+            freshness: Optional recency window such as ``d1`` (today), ``w1``,
+                ``m1`` (month to date) or ``y1`` (year to date).
+            max_results: Number of results to request (1 to 20).
+
+        Returns:
+            Dict with ``content`` (Markdown report), ``query``, ``provider``
+            and ``sources`` (list of ``{title, url, snippet, site}``).
+
+        Raises:
+            ValueError: If the query or the filters are malformed.
+            PermissionError: If the token is rejected.
+            RuntimeError: For upstream failures, including an exhausted quota.
+        """
+        query = str(query or "").strip()
+        if len(query) < 2:
+            raise ValueError("搜索关键词至少需要 2 个字符。")
+        if len(query) > WORKBUDDY_MAX_SEARCH_QUERY_CHARS:
+            raise ValueError(
+                f"搜索关键词不能超过 {WORKBUDDY_MAX_SEARCH_QUERY_CHARS} 个字符。"
+            )
+        allowed = [str(d).strip() for d in (allowed_domains or []) if str(d).strip()]
+        blocked = [str(d).strip() for d in (blocked_domains or []) if str(d).strip()]
+        freshness = str(freshness or "").strip().lower()
+        if freshness and not _FRESHNESS_PATTERN.fullmatch(freshness):
+            raise ValueError("时效参数格式应为 d1 / w1 / m1 / y1 这类「单位+数字」。")
+        try:
+            count = int(max_results)
+        except (TypeError, ValueError):
+            count = WORKBUDDY_SEARCH_DEFAULT_RESULTS
+        count = max(1, min(count, WORKBUDDY_SEARCH_MAX_RESULTS))
+
+        request_query = query
+        if blocked:
+            request_query = f"{query} ({' '.join(f'-site:{d}' for d in blocked)})"
+        body: dict = {"query": request_query, "type": "text2text", "max_results": count}
+        if allowed:
+            body["allowed_domains"] = allowed
+        if freshness:
+            body["freshness"] = freshness
+
+        payload = await self._agent_tool_request(
+            WORKBUDDY_SEARCH_API_PATH, body, timeout=30
+        )
+        results = payload.get("results")
+        if not isinstance(results, list):
+            raise RuntimeError("联网搜索响应缺少 results 数组。")
+        sources: list[dict] = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            url = item.get("url")
+            if not isinstance(url, str) or not url:
+                continue
+            sources.append(
+                {
+                    "title": str(item.get("title") or ""),
+                    "url": url,
+                    "snippet": str(item.get("snippet") or ""),
+                    "site": str(item.get("site") or ""),
+                }
+            )
+        provider = str(payload.get("provider") or "")
+        logger.info(
+            "[WorkBuddy] 联网搜索 query=%r freshness=%r results=%d",
+            query[:60],
+            freshness or "-",
+            len(sources),
+        )
+        return {
+            "content": _format_search_results(sources, query, provider),
+            "query": query,
+            "provider": provider,
+            "sources": sources,
+        }
+
+    async def fetch_web(self, url: str, prompt: str = "") -> dict:
+        """Fetch one web page through the WorkBuddy subscription fetch tool.
+
+        Args:
+            url: The ``http``/``https`` URL to read.
+            prompt: Optional instruction describing what to extract; the
+                upstream returns Markdown regardless.
+
+        Returns:
+            Dict with ``url``, ``title`` and the bounded Markdown ``content``.
+
+        Raises:
+            ValueError: If the URL or the prompt is malformed.
+            PermissionError: If the token is rejected.
+            RuntimeError: For upstream failures.
+        """
+        url = str(url or "").strip()
+        try:
+            parsed = urlsplit(url)
+        except ValueError as e:
+            raise ValueError("请输入有效的 http/https 网址。") from e
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ValueError("请输入有效的 http/https 网址。")
+        prompt = str(prompt or "").strip()
+        if len(prompt) > WORKBUDDY_MAX_FETCH_PROMPT_CHARS:
+            raise ValueError(
+                f"提取要求不能超过 {WORKBUDDY_MAX_FETCH_PROMPT_CHARS} 个字符。"
+            )
+        body = {"url": url, "prompt": prompt or "总结这个页面的主要内容"}
+        payload = await self._agent_tool_request(
+            WORKBUDDY_WEBFETCH_API_PATH, body, timeout=60
+        )
+        content = payload.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("网页抓取没有返回内容。")
+        content = content.strip()
+        if len(content) > WORKBUDDY_WEB_FETCH_MAX_CHARS:
+            content = (
+                content[:WORKBUDDY_WEB_FETCH_MAX_CHARS] + "\n（内容过长已截断）"
+            )
+        return {
+            "url": str(payload.get("url") or url),
+            "title": str(payload.get("title") or ""),
+            "content": content,
+        }
+
+
+def _format_search_results(sources: list[dict], query: str, provider: str) -> str:
+    """Render search hits as a bounded Markdown block for the model.
+
+    Args:
+        sources: Normalized ``{title, url, snippet, site}`` entries.
+        query: The user-facing query, used in the heading.
+        provider: Upstream provider marker, shown as a footnote when present.
+
+    Returns:
+        A Markdown report, truncated to the configured character budget.
+    """
+    if not sources:
+        return f'联网搜索没有找到与「{query}」相关的结果。'
+    lines = [f"# 联网搜索结果：{query}", ""]
+    for index, item in enumerate(sources, 1):
+        lines.append(f"{index}. [{item['title'] or item['url']}]({item['url']})")
+        if item["snippet"]:
+            lines.append(f"   {item['snippet']}")
+    text = "\n".join(lines)
+    if provider:
+        text += f"\n\n（来源：WorkBuddy 联网搜索 provider={provider}）"
+    if len(text) > WORKBUDDY_WEB_SEARCH_MAX_CHARS:
+        text = (
+            text[:WORKBUDDY_WEB_SEARCH_MAX_CHARS].rsplit("\n", 1)[0]
+            + "\n（内容过长已截断）"
+        )
+    return text
 
 
 def _image_error_detail(resp: httpx.Response) -> str:

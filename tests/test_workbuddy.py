@@ -356,6 +356,76 @@ def test_extract_credit_packages_handles_missing_data():
     assert source._extract_credit_packages({"data": {}}) == []
 
 
+# --- web search / fetch -----------------------------------------------------
+
+
+def test_format_search_results_renders_markdown_links():
+    text = source._format_search_results(
+        [
+            {"title": "标题一", "url": "https://a.test/1", "snippet": "摘要一", "site": "a.test"},
+            {"title": "", "url": "https://b.test/2", "snippet": "", "site": "b.test"},
+        ],
+        "关键词",
+        "1",
+    )
+    assert "[标题一](https://a.test/1)" in text
+    assert "摘要一" in text
+    # A missing title falls back to the URL so no entry is rendered empty.
+    assert "[https://b.test/2](https://b.test/2)" in text
+    assert "provider=1" in text
+
+
+def test_format_search_results_handles_no_hits():
+    assert "没有找到" in source._format_search_results([], "关键词", "")
+
+
+def test_format_search_results_truncates_long_output():
+    long_snippet = "字" * 20_000
+    text = source._format_search_results(
+        [{"title": "t", "url": "https://a.test/", "snippet": long_snippet, "site": ""}],
+        "q",
+        "",
+    )
+    assert len(text) <= source.WORKBUDDY_WEB_SEARCH_MAX_CHARS + 20
+    assert text.endswith("（内容过长已截断）")
+
+
+def test_search_web_rejects_bad_input_without_network():
+    """Validation must short-circuit before any upstream request."""
+    provider = _provider_with_catalog([], "auto")
+    with pytest.raises(ValueError):
+        asyncio.run(provider.search_web("a"))
+    with pytest.raises(ValueError):
+        asyncio.run(provider.search_web("ok", freshness="xyz"))
+    with pytest.raises(ValueError):
+        asyncio.run(provider.search_web("字" * 3000))
+
+
+def test_fetch_web_rejects_bad_url_without_network():
+    provider = _provider_with_catalog([], "auto")
+    for bad in ("ftp://example.test/", "notaurl", "", "javascript:alert(1)"):
+        with pytest.raises(ValueError):
+            asyncio.run(provider.fetch_web(bad))
+
+
+def test_search_max_results_setting_bounds():
+    source.update_workbuddy_settings({"search_max_results": 9})
+    assert source.get_workbuddy_settings()["search_max_results"] == 9
+    # Out-of-range and wrongly-typed values must not clobber the setting.
+    source.update_workbuddy_settings({"search_max_results": 999})
+    assert source.get_workbuddy_settings()["search_max_results"] == 9
+    source.update_workbuddy_settings({"search_max_results": "many"})
+    assert source.get_workbuddy_settings()["search_max_results"] == 9
+    source.update_workbuddy_settings(
+        {"search_max_results": source.WORKBUDDY_SEARCH_DEFAULT_RESULTS}
+    )
+
+
+def test_search_endpoint_paths_match_official_client():
+    assert source.WORKBUDDY_SEARCH_API_PATH == "/agenttool/v1/search"
+    assert source.WORKBUDDY_WEBFETCH_API_PATH == "/agenttool/v1/webfetch"
+
+
 # --- diagnostics ------------------------------------------------------------
 
 

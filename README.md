@@ -15,6 +15,7 @@
 - **DeepSeek 思维链**：自动为 deepseek 系列注入 `thinking.type=enabled` + 推理档位，思维链正常回传
 - **订阅额度查询**：`/workbuddy_usage` 显示账号、令牌有效期与各额度包剩余 credits
 - **图片生成与改图**：`/workbuddy_image` 指令 + LLM 工具 `workbuddy_generate_image`，走官方图片端点（`/v2/images/generations` 与 `/v2/images/edits`）；当前消息或引用消息带图时自动改图，最多 3 张参考图
+- **联网搜索与网页读取**：`/workbuddy_search` 指令 + LLM 工具 `workbuddy_web_search` / `workbuddy_web_fetch`，走官方 `/agenttool/v1/*` 端点，支持时效过滤（今天/本周/本月/今年）；可一键顶替 AstrBot 自带联网搜索
 - **完整能力**：流式输出、工具调用（Function Calling）、多模态图片输入、多 Key 轮转、`prompt_cache_key` 费用优化
 
 ## 图片生成说明
@@ -27,6 +28,20 @@ WorkBuddy 的绘图能力**不在对话端点上**：用 `hunyuan-image-*` 模�
 | 改图 | `POST {base}/v2/images/edits` | 上述字段 + `image`（data URL 数组）/ `input_fidelity` |
 
 可选模型从模型目录中按标签自动发现：`text-to-image` → `hunyuan-image-alpha`，`image-to-image` → `hunyuan-image-alpha-edit`。响应形如 `{"code":0,"data":{"data":[{"url": "..."}],"usage":{"credit": 5.71}}}`，插件既支持 `url` 也会下载，也支持上游返回 `b64_json`。生成一张 1024x1024 约 9~15 秒、约 5.7 credits。
+
+## 联网搜索说明
+
+订阅自带的联网搜索同样不在对话端点上，而是走独立的工具端点（与官方客户端的 `WebSearchTool` / `WebFetchTool` 实现一致）：
+
+| 能力 | 端点 | 请求体 |
+|------|------|--------|
+| 联网搜索 | `POST {base}/agenttool/v1/search` | `{"query": "...", "type": "text2text", "max_results": 5}`，可选 `allowed_domains` / `freshness` |
+| 网页读取 | `POST {base}/agenttool/v1/webfetch` | `{"url": "...", "prompt": "..."}` |
+
+- 搜索响应为 `{"query": ..., "provider": "1", "results": [{"title","url","snippet","site"}]}`；网页读取响应为 `{"url","title","content"}`（Markdown 正文）。
+- `freshness` 取值形如 `d1`（今天）、`w1`（最近一周）、`m1`（本月至今）、`y1`（今年至今）。
+- 屏蔽域名会按官方客户端做法拼成 `-site:` 操作符追加到查询词后面。
+- ⚠️ **联网搜索有独立额度**：客户端错误码表中 `15001` 即 `quota_web_search`，与对话额度分开计费，额度不足时插件会明确提示。
 
 ## 风险提示
 
@@ -52,6 +67,7 @@ WorkBuddy 的绘图能力**不在对话端点上**：用 `hunyuan-image-*` 模�
 | `/workbuddy_reasoning [级别]` | 管理员 | 查看/设置推理深度 |
 | `/workbuddy_image_model [auto\|list\|refresh\|模型ID]` | 管理员 | 查看、切换、刷新图片模型 |
 | `/workbuddy_image <描述>` | 所有人 | 生成图片；附带或引用图片即为改图 |
+| `/workbuddy_search <关键词>` | 所有人 | 用订阅额度联网搜索，返回带链接的实时结果 |
 
 ## LLM 工具
 
@@ -59,6 +75,8 @@ WorkBuddy 的绘图能力**不在对话端点上**：用 `hunyuan-image-*` 模�
 |--------|------|
 | `workbuddy_generate_image` | 生成或编辑图片并直接发送给用户；默认把当前/引用图片作为编辑输入 |
 | `workbuddy_image_models` | 查询当前账号可用的文生图 / 改图模型清单 |
+| `workbuddy_web_search` | 联网搜索实时信息，支持时效过滤（`d1`/`w1`/`m1`/`y1`） |
+| `workbuddy_web_fetch` | 读取指定网址的正文并返回 Markdown |
 
 ## 配置项
 
@@ -71,6 +89,10 @@ WorkBuddy 的绘图能力**不在对话端点上**：用 `hunyuan-image-*` 模�
 | `image_edit_model` | `auto` | 改图模型；`auto` 取目录中第一个 `image-to-image` 模型 |
 | `image_size` | `1024x1024` | 图片尺寸（另支持 `1024x1536` / `1536x1024`） |
 | `image_n` | `1` | 单次生成张数（1-4，插件只发送第一张） |
+| `enable_search_tool` | `true` | 注册 `workbuddy_web_search` 联网搜索工具 |
+| `enable_fetch_tool` | `true` | 注册 `workbuddy_web_fetch` 网页读取工具 |
+| `force_workbuddy_web_search` | `false` | 开启后禁用 AstrBot 自带联网搜索，只走 WorkBuddy；关闭/卸载时自动恢复 |
+| `search_max_results` | `5` | 每次联网搜索请求的结果条数（1-20） |
 
 提供商级别的配置：`api_base`（CN 默认 `https://copilot.tencent.com`，国际版 `https://www.workbuddy.ai`）、`proxy`（**留空即直连**）、`model`、`key`、`timeout`。
 
